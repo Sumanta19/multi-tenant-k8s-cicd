@@ -1,0 +1,388 @@
+Multi-Tenant Kubernetes Architecture (Local Development)
+This repository contains the configuration for a multi-tenant Kubernetes architecture running locally on macOS using Rancher Desktop (K3s).
+
+🏗️ Architecture Overview
+Ingress Controller: A single shared ingress-nginx controller handles all incoming traffic and terminates TLS.
+
+TLS Management: cert-manager automatically requests certificates from Let's Encrypt (Staging) using HTTP-01 challenges.
+
+Multi-Tenancy: Tenants are isolated in their own namespaces (user1, user2).
+
+Network Security: NetworkPolicy denies all cross-tenant traffic. Pods can only be reached by the ingress-nginx namespace.
+
+High Availability: Deployments use 2 replicas with /readyz and /healthz probes to manage endpoint routing and container restarts.
+
+🛠️ Prerequisites
+Rancher Desktop installed on macOS.
+
+kubectl installed.
+
+🚀 Step-by-Step Setup
+Step 1: Prepare Rancher Desktop
+Open Rancher Desktop Preferences -> Kubernetes.
+
+Uncheck "Enable Traefik" (we use NGINX instead).
+
+Click Apply and wait for the cluster to restart.
+
+Step 2: Install NGINX Ingress Controller
+bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/cloud/deploy.yaml
+Wait for the ingress-nginx-controller pod to be Running.
+
+Step 3: Expose Ports (macOS requires sudo for ports < 1024)
+Open two separate terminal windows and run these commands. Keep them running in the background.
+
+bash
+# Terminal 1 (HTTP)
+sudo kubectl port-forward -n ingress-nginx service/ingress-nginx-controller 80:80
+
+# Terminal 2 (HTTPS)
+sudo kubectl port-forward -n ingress-nginx service/ingress-nginx-controller 443:443
+Step 4: Install cert-manager
+bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.15.4/cert-manager.yaml
+Wait for all 3 pods in the cert-manager namespace to be Running.
+
+Step 5: Configure Let's Encrypt ClusterIssuer
+Create a file clusterissuer.yaml (replace the email with your real email):
+
+yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: your-email@example.com # Must not be example.com
+    privateKeySecretRef:
+      name: letsencrypt-staging
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx
+Apply it:
+
+bash
+kubectl apply -f clusterissuer.yaml
+Verify it says READY: True (kubectl get clusterissuer).
+
+Step 6: Deploy the Tenants
+Create and apply user1-demo.yaml and user2-demo.yaml. (These files include Namespace, NetworkPolicy, Deployment, Service, and Ingress).
+
+bash
+kubectl apply -f user1-demo.yaml
+kubectl apply -f user2-demo.yaml
+Step 7: Configure Local DNS
+Map the tenant domains to your localhost by editing your Mac's hosts file:
+
+bash
+sudo nano /etc/hosts
+Add the following lines:
+
+text
+127.0.0.1 user1.localhost
+127.0.0.1 user2.localhost
+Save and exit (Ctrl+O, Enter, Ctrl+X).
+
+🧪 Validation & Testing
+1. Test Ingress & TLS
+Go to http://user1.localhost -> Should see the Nginx welcome page.
+
+Go to https://user1.localhost -> Should see the Nginx page, but with a "Not Secure" warning. (This is expected because we are using Let's Encrypt Staging certificates).
+
+2. Test NetworkPolicy Isolation
+Prove that user2 cannot communicate with user1 directly:
+
+bash
+kubectl exec -it deployment/web-app -n user2 -- sh
+Inside the pod, try to reach user1:
+
+bash
+wget -qO- --timeout=3 http://web-service.user1.svc.cluster.local
+Expected Result: Connection refused or Timeout (Isolation works!).
+
+Test outbound internet access:
+
+bash
+wget -qO- --timeout=3 https://google.com
+Expected Result: HTML of Google (Egress works!).
+
+Type exit to leave the pod.
+
+🧹 Cleanup
+To remove all resources and stop the setup:
+
+bash
+kubectl delete ns user1 user2
+Press Ctrl+C in the terminal windows running the port-forward commands to stop routing local traffic.
+
+
+
+
+
+Multi-Tenant Kubernetes Architecture with CI/CD (M2)
+This repository contains a fully automated, event-driven, multi-tenant Kubernetes architecture. It simulates a real-world CI/CD pipeline and includes a Kafka event bus for deployment notifications.
+
+🏗️ Architecture Overview
+CI/CD Pipeline (ci-pipeline.sh): Automates Docker builds, security scanning, pushing to a local registry, and Helm deployments.
+
+Security Gate: Uses Trivy to scan images for vulnerabilities.
+
+Helm: Dynamically deploys tenants using a reusable chart and tenant-specific values.yaml files.
+
+Health Gate: Runs a curl / smoke test after deployment. If it fails, it triggers a helm rollback.
+
+Event Broker (Kafka): Publishes WebsiteCreated events on success.
+
+Event Consumer ("notify"): A Python application that listens to Kafka, ensures idempotency (using tenant-sha keys), and simulates Slack/Email notifications. Includes Dead Letter Queue (DLQ) logic for failures.
+
+🛠️ Prerequisites
+Docker (or Rancher Desktop with Docker CLI).
+
+Helm (brew install helm).
+
+Trivy (brew install aquasecurity/trivy/trivy).
+
+A running Kubernetes cluster (Rancher Desktop / K3s) with the ingress-nginx controller installed (from M1).
+
+🚀 Step-by-Step Setup
+Step 1: Start the Local Container Registry
+We need a local registry to store the images built by the pipeline.
+
+bash
+docker run -d -p 5000:5000 --name registry registry:2
+Step 2: Setup the Helm Chart
+Ensure your Helm chart is in charts/web-app/ and your tenant configurations are in tenants/.
+
+tenants/user1.yaml should contain host: user1.localhost
+
+charts/web-app/values.yaml should define the default image, replicas, and ingress settings.
+
+Step 3: Deploy Kafka
+We use a local Bitnami Kafka cluster for testing. (Note: We use the bitnamilegacy images to bypass recent Bitnami licensing changes).
+
+bash
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+
+helm install kafka bitnami/kafka \
+  --set replicaCount=1 \
+  --set zookeeper.enabled=true \
+  --set persistence.enabled=false \
+  --set zookeeper.persistence.enabled=false \
+  --set global.security.allowInsecureImages=true \
+  --set image.registry=docker.io \
+  --set image.repository=bitnamilegacy/kafka \
+  --set zookeeper.image.registry=docker.io \
+  --set zookeeper.image.repository=bitnamilegacy/zookeeper \
+  --set listeners.client.protocol=PLAINTEXT
+Wait for the kafka-controller-0 and kafka-zookeeper-0 pods to show Running.
+
+Step 4: Deploy the Kafka Consumer
+The consumer is located in the consumer/ folder.
+
+Build and push the consumer image:
+
+bash
+docker build --no-cache -t localhost:5000/notify-consumer:v1 ./consumer
+docker push localhost:5000/notify-consumer:v1
+Deploy the consumer to Kubernetes:
+
+bash
+kubectl apply -f consumer-deployment.yaml
+Step 5: Make the CI Pipeline Executable
+Ensure your pipeline script is executable:
+
+bash
+chmod +x ci-pipeline.sh
+🧪 How to Run and Validate the Pipeline
+1. Trigger a Deployment
+Run the pipeline for a specific tenant:
+
+bash
+./ci-pipeline.sh user1
+What happens:
+
+It builds the Docker image and tags it with YYYYMMDD-sha.
+
+Trivy scans it (currently configured to warn but not fail).
+
+Pushes the image to localhost:5000.
+
+Runs helm upgrade --install.
+
+Performs a health check via port-forward and curl.
+
+Publishes a JSON event ({"event":"WebsiteCreated","tenant":"user1"}) to the website.events Kafka topic.
+
+2. Verify the Kafka Event
+Check the logs of the Python consumer to see it process the event and simulate the Slack notification:
+
+bash
+kubectl logs -l app=notify-consumer
+3. Test Idempotency
+If you restart the consumer, or if the pipeline pushes the same tenant-sha pair again, you will see the consumer skip it:
+
+text
+⏭️ Skipping duplicate event: user1-local
+4. Test the Rollback (The "Fail" Path)
+To see the pipeline's health gate fail and trigger a Helm rollback:
+
+Temporarily edit app/index.html to break the web server (or delete the file).
+
+Run ./ci-pipeline.sh user1.
+
+The pipeline will deploy, but the Health Gate (curl) will fail.
+
+The script will automatically trigger helm rollback user1 and publish a deploy.failed event.
+
+🧹 Cleanup
+To tear down the M2 resources when you are finished testing:
+
+bash
+# Uninstall the apps and Kafka
+helm uninstall user1 user2 kafka
+
+# Delete the consumer
+kubectl delete deployment notify-consumer
+kubectl delete pod kafka-consumer-verify --ignore-not-found
+
+# Delete the namespaces
+kubectl delete ns user1 user2
+
+# Stop the local registry
+docker stop registry
+docker rm registry
+
+
+
+Multi-Tenant Kubernetes Architecture with CI/CD & Observability (M2)
+This repository contains a fully automated, event-driven, multi-tenant Kubernetes architecture. It includes a local CI/CD pipeline, a Kafka event bus for deployment notifications, Horizontal Pod Autoscaling (HPA), and a Prometheus/Grafana observability stack.
+
+🏗️ Architecture Overview
+CI/CD Pipeline (ci-pipeline.sh): Automates Docker builds, Trivy security scanning, pushing to a local registry, and Helm deployments.
+
+Multi-Tenancy: Tenants are isolated in their own namespaces with strict NetworkPolicies. Cross-tenant traffic is denied.
+
+Health Gates & Rollback: Runs a curl smoke test after deployment. If it fails, it triggers an automatic helm rollback.
+
+Event Broker (Kafka): Publishes WebsiteCreated events on success to the website.events topic.
+
+Event Consumer ("notify"): A Python app that listens to Kafka, ensures idempotency (tenant, sha), and simulates Slack notifications.
+
+Autoscaling & Capacity: HPA scales pods based on 50% CPU target. A ResourceQuota acts as a capacity policy, blocking the HPA from overloading the node.
+
+Observability: Prometheus and Grafana monitor cluster health, pod status, and resource saturation.
+
+🛠️ Prerequisites
+Docker (or Rancher Desktop with Docker CLI).
+
+Helm (brew install helm).
+
+Trivy (brew install aquasecurity/trivy/trivy).
+
+A running Kubernetes cluster (Rancher Desktop / K3s) with the ingress-nginx controller installed.
+
+metrics-server enabled (Standard in Rancher Desktop).
+
+🚀 Step-by-Step Setup
+1. Start the Local Container Registry
+bash
+docker run -d -p 5000:5000 --name registry registry:2
+2. Deploy Kafka
+We use a local Bitnami Kafka cluster. (Note: We use the bitnamilegacy images to bypass recent Bitnami licensing changes).
+
+bash
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+
+helm install kafka bitnami/kafka \
+  --set replicaCount=1 \
+  --set zookeeper.enabled=true \
+  --set persistence.enabled=false \
+  --set zookeeper.persistence.enabled=false \
+  --set global.security.allowInsecureImages=true \
+  --set image.registry=docker.io \
+  --set image.repository=bitnamilegacy/kafka \
+  --set zookeeper.image.registry=docker.io \
+  --set zookeeper.image.repository=bitnamilegacy/zookeeper \
+  --set listeners.client.protocol=PLAINTEXT
+3. Deploy the Kafka Consumer
+The consumer ensures idempotency based on the (tenant, sha) key.
+
+bash
+docker build --no-cache -t localhost:5000/notify-consumer:v1 ./consumer
+docker push localhost:5000/notify-consumer:v1
+kubectl apply -f consumer-deployment.yaml
+4. Deploy Observability Stack (Prometheus & Grafana)
+bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+helm install monitoring prometheus-community/kube-prometheus-stack --namespace monitoring --create-namespace
+Access Grafana:
+
+Get the admin password:
+kubectl get secret --namespace monitoring monitoring-grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
+
+Port-forward:
+kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
+
+Open http://localhost:3000 (User: admin, Password: from step 1).
+
+🧪 Pipeline & Scaling Validation
+Test 1: Trigger a Deployment (CI/CD)
+Ensure your ci-pipeline.sh has the correct helm upgrade command with the Kafka publish logic, then run:
+
+bash
+./ci-pipeline.sh user1
+What happens: Builds image ➔ Trivy scans ➔ Pushes to registry ➔ Deploys via Helm ➔ Tests health ➔ Publishes JSON to Kafka.
+Verify Kafka: kubectl logs -l app=notify-consumer
+
+Test 2: Test Autoscaling & The "Blocked Path" (Resource Quota)
+We configured user1-hpa.yaml (target 50% CPU, max 6 pods) and user1-quota.yaml (max 4 pods).
+
+Apply the Quota and HPA:
+
+bash
+kubectl apply -f user1-quota.yaml
+kubectl apply -f user1-hpa.yaml
+Start Load: Run a load generator in the user1 namespace:
+
+bash
+kubectl run load-generator -n user1 --image=fortio/fortio:latest --restart=Never --overrides='{"apiVersion":"v1","spec":{"containers":[{"name":"load-generator","image":"fortio/fortio:latest","resources":{"requests":{"cpu":"50m","memory":"32Mi"},"limits":{"cpu":"100m","memory":"64Mi"}},"args":["load","-c","50","-qps","0","-t","120s","http://web-service"]}]}}'
+Watch HPA: kubectl get hpa -n user1 -w
+
+CPU spikes ➔ Replicas increase from 2 to 4.
+
+Observe Quota Block: The HPA wants 6 pods, but the ResourceQuota blocks the 5th pod.
+
+Run kubectl describe quota -n user1 to see pods: 4/4.
+
+Run kubectl get events -n user1 | grep FailedCreate to see the exact quota rejection.
+
+Scale Down: Delete the load generator (kubectl delete pod load-generator -n user1 --grace-period=0 --force). The HPA will wait 5 minutes before scaling back to 2 pods.
+
+Test 3: Test the Rollback (The "Fail" Path)
+Break the app (e.g., delete app/index.html).
+
+Run ./ci-pipeline.sh user1.
+
+The Health Gate (curl) fails.
+
+The script triggers helm rollback user1 and prints a deploy.failed event.
+
+🧹 Cleanup
+To tear down the M2 resources when you are finished testing:
+
+bash
+# Uninstall apps, Kafka, and Observability
+helm uninstall user1 user2 kafka monitoring
+
+# Delete consumer and namespaces
+kubectl delete deployment notify-consumer
+kubectl delete ns user1 user2 monitoring
+
+# Stop the local registry
+docker stop registry && docker rm registry

@@ -1,0 +1,13 @@
+# Install ingress-nginx
+kubectl apply -f https://kind.sigs.k8s.io/examples/ingress/deploy-ingress-nginx.yaml
+
+# Patch the service to NodePort with explicit port 30443 for HTTPS
+kubectl patch svc ingress-nginx-controller -n ingress-nginx -p '{
+  "spec": {
+    "type": "NodePort",
+    "ports": [
+      {"name": "http",  "port": 80,  "targetPort": 80,  "nodePort": 30080},
+      {"name": "https", "port": 443, "targetPort": 443, "nodePort": 30443}
+    ]
+  }
+}'

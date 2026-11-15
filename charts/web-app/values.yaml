@@ -1,0 +1,18 @@
+replicaCount: 2
+image:
+  repository: nginx
+  tag: alpine
+  pullPolicy: IfNotPresent
+
+host: "" # Overridden by tenant
+ingressClassName: nginx
+clusterIssuer: letsencrypt-staging
+rateLimitRps: 200
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi

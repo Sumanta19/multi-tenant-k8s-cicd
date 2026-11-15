@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notify-consumer
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notify-consumer
+  template:
+    metadata:
+      labels:
+        app: notify-consumer
+    spec:
+      containers:
+        - name: consumer
+          image: localhost:5000/notify-consumer:v1
+          imagePullPolicy: Always
